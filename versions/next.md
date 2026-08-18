@@ -4,21 +4,8 @@
 1. **V0 — Single agent + 3 tools (current). DONE**
    See [v0.md](v0.md) for the full spec. Focus: tool calling, structured outputs, and the separation between the LLM and business logic.
 
-2. **V1 — Real conversations**
-   Add cases where information is missing:
-
-   ```text
-   User: "I want to cancel my order."
-   Agent: "Which one of your orders?"
-   ```
-
-   The agent looks up:
-
-   ```python
-   get_customer_orders(customer_id)
-   ```
-
-   and keeps conversation state.
+2. **V1 — Real conversations (in progress)**
+   See [v1.md](v1.md) for the full spec. Adds a `get_customer_orders(customer_id)` tool, conversation state across turns, and generalizes the tool-calling loop to a bounded `while` so the agent can chain dependent tool calls within one turn.
 
 3. **V2 — LangGraph**
    This is where LangGraph would actually come in.
