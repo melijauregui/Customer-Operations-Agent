@@ -1,5 +1,5 @@
-"""Lógica de negocio de pedidos. El LLM nunca ejecuta este código directamente:
-solo puede pedir que se llame a una de estas funciones, con argumentos ya validados."""
+"""Order business logic. The LLM never executes this code directly:
+it can only request that one of these functions be called, with already-validated arguments."""
 
 from datetime import date
 
@@ -27,8 +27,9 @@ def _not_found_error(order_id: int) -> dict:
 
 
 def _find_owned_order(order_id: int, customer_id: int) -> dict | None:
-    """Busca el pedido y valida que sea del cliente que lo pide. Si no es dueño,
-    se trata igual que "no existe" — no confirmamos la existencia de pedidos ajenos."""
+    """Looks up the order and validates it belongs to the customer requesting it.
+    If it's not theirs, treated the same as "not found" — we never confirm the
+    existence of someone else's order."""
     order = orders.get(order_id)
     if order is None or order["customer_id"] != customer_id:
         return None
@@ -43,8 +44,8 @@ def get_order(order_id: int, customer_id: int) -> dict:
 
 
 def get_customer_orders(customer_id: int) -> dict:
-    """Lista los pedidos de un cliente. Una lista vacía no es un error: significa
-    que ese cliente no tiene pedidos, no que algo haya salido mal."""
+    """Lists a customer's orders. An empty list is not an error: it means that
+    customer has no orders, not that something went wrong."""
     matching_orders = [order for order in orders.values() if order["customer_id"] == customer_id]
     return {"success": True, "customer_id": customer_id, "orders": matching_orders}
 

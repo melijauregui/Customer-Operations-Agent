@@ -1,8 +1,8 @@
-"""Fixtures compartidas.
+"""Shared fixtures.
 
-`orders` en app/tools/orders.py es un dict global mutable (nuestra "DB" en memoria).
-Sin resetearlo, un test que cancela el pedido 123 dejaría ese estado filtrado a
-los tests que corren después. reset_orders() lo repone antes de cada test.
+`orders` in app/tools/orders.py is a mutable global dict (our in-memory "DB").
+Without resetting it, a test that cancels order 123 would leak that state into
+tests that run afterward. reset_orders() restores it before every test.
 """
 
 import copy

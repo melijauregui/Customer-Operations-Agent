@@ -1,4 +1,4 @@
-"""Unit tests de la lógica de negocio en app/tools/orders.py — sin LLM de por medio."""
+"""Unit tests for the business logic in app/tools/orders.py — no LLM involved."""
 
 from app.tools.orders import cancel_order, change_delivery_date, get_order
 

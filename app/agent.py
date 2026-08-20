@@ -1,9 +1,9 @@
-"""Integración con el LLM y loop de tool calling.
+"""LLM integration and tool-calling loop.
 
-El modelo decide QUÉ tool llamar y con qué argumentos (tool/function calling nativo
-de OpenAI) — este módulo nunca decide la acción por reglas propias (nada de
-`if "cancelar" in message`). Toda la lógica de negocio vive en app/tools/orders.py;
-acá solo se orquesta: LLM -> tool -> LLM.
+The model decides WHICH tool to call and with what arguments (native OpenAI
+tool/function calling) — this module never decides the action via its own rules
+(no `if "cancel" in message`). All business logic lives in app/tools/orders.py;
+this only orchestrates: LLM -> tool -> LLM.
 """
 
 import json
@@ -114,8 +114,8 @@ def _execute_tool_call(tool_call) -> dict:
 
 
 async def handle_message(message: str, client=None) -> str:
-    """Corre el loop completo: LLM elige tool -> se ejecuta -> LLM redacta respuesta final."""
-    # client=None en producción -> se crea el real; en tests se pasa un mock acá.
+    """Runs the full loop: LLM picks a tool -> it gets executed -> LLM writes the final answer."""
+    # client=None in production -> a real one gets created; tests pass a mock here.
     client = client or get_client()
     logger.info("user_message=%s", message)
 
@@ -124,8 +124,8 @@ async def handle_message(message: str, client=None) -> str:
         {"role": "user", "content": message},
     ]
 
-    # 1ra llamada al LLM: le pasamos las tools disponibles y el modelo decide
-    # si necesita alguna (tool_choice="auto" es el default de la API).
+    # 1st call to the LLM: we pass the available tools and the model decides
+    # whether it needs one (tool_choice="auto" is the API's default).
     first_response = await client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
@@ -133,16 +133,16 @@ async def handle_message(message: str, client=None) -> str:
     )
     assistant_message = first_response.choices[0].message
 
-    # El modelo respondió directo, sin pedir ninguna tool (ej: saludo, pregunta
-    # que no requiere datos reales). No hay nada que ejecutar.
+    # The model answered directly, without requesting any tool (e.g. a greeting,
+    # a question that doesn't need real data). Nothing to execute.
     if not assistant_message.tool_calls:
         final_text = assistant_message.content or ""
         logger.info("final_response=%s", final_text)
         return final_text
 
-    # El modelo pidió una o más tools: las ejecutamos nosotros (nunca el LLM
-    # directamente) y devolvemos cada resultado como mensaje role="tool",
-    # enlazado por tool_call_id a la llamada que lo originó.
+    # The model requested one or more tools: we execute them ourselves (never
+    # the LLM directly) and return each result as a role="tool" message, linked
+    # by tool_call_id to the call that triggered it.
     messages.append(assistant_message)
     for tool_call in assistant_message.tool_calls:
         result = _execute_tool_call(tool_call)
@@ -154,9 +154,9 @@ async def handle_message(message: str, client=None) -> str:
             }
         )
 
-    # 2da llamada al LLM: ahora tiene el resultado real de la(s) tool(s) en el
-    # historial y solo redacta la respuesta en base a eso (no vuelve a decidir
-    # tools acá, así que no le pasamos `tools=`).
+    # 2nd call to the LLM: it now has the real result of the tool(s) in the
+    # history and just writes the response based on that (it doesn't decide on
+    # tools again here, so we don't pass `tools=`).
     second_response = await client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,

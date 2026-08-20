@@ -1,7 +1,7 @@
-"""Configuración y creación del cliente de OpenAI.
+"""Configuration and creation of the OpenAI client.
 
-get_client() se llama en tiempo de ejecución (no a nivel de módulo) para que los
-tests puedan reemplazar fácilmente el cliente sin necesitar el API key real.
+get_client() is called at runtime (not at module level) so tests can easily
+swap out the client without needing a real API key.
 """
 
 import os

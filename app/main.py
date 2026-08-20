@@ -1,7 +1,7 @@
-"""FastAPI app: expone el agente vía POST /chat.
+"""FastAPI app: exposes the agent via POST /chat.
 
-Esta capa no tiene lógica propia — solo recibe el mensaje del usuario, se lo
-pasa al agente (app/agent.py) y devuelve lo que este responda.
+This layer has no logic of its own — it just takes the user's message, passes
+it to the agent (app/agent.py), and returns whatever it responds.
 """
 
 import logging
