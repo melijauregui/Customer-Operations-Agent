@@ -17,5 +17,5 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="requires a real OPENAI_API_KEY")
 async def test_agent_selects_get_order_for_real_question():
-    response = await handle_message("¿Dónde está mi pedido 123?")
+    response, _ = await handle_message("¿Dónde está mi pedido 123?", customer_id=1)
     assert "123" in response

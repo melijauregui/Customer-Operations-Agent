@@ -10,6 +10,7 @@ import copy
 import pytest
 
 from app.tools import orders as orders_module
+from app.agent import conversations
 
 _INITIAL_ORDERS = copy.deepcopy(orders_module.orders)
 
@@ -18,3 +19,4 @@ _INITIAL_ORDERS = copy.deepcopy(orders_module.orders)
 def reset_orders():
     orders_module.orders.clear()
     orders_module.orders.update(copy.deepcopy(_INITIAL_ORDERS))
+    conversations.clear()

@@ -1,6 +1,6 @@
 # Customer Operations Agent
 
-AI agent platform for Customer Operations, built progressively across versions. This is **V0**: a single agent, three tools, and a hard focus on understanding tool calling, structured outputs, and the separation between the LLM and business logic.
+AI agent platform for Customer Operations, built progressively across versions. This is **V1**: one conversational agent, four order tools, in-memory conversation state, and a bounded multi-step tool-calling loop.
 
 
 ## Installation
@@ -46,37 +46,53 @@ pytest -m integration
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "Where is my order 123?"}'
+  -d '{"message": "Where is my order 123?", "customer_id": 1}'
 ```
 
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "Cancel order 123"}'
+  -d '{"message": "Cancel order 123", "customer_id": 1}'
 ```
 
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "I want to change the delivery of order 123 to August 21, 2026"}'
+  -d '{"message": "I want to change the delivery of order 123 to August 21, 2026", "customer_id": 1}'
 ```
 
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "Cancel order 999"}'
+  -d '{"message": "Cancel order 999", "customer_id": 1}'
 # the order doesn't exist -> the agent reports it, never invents a cancellation
 ```
 
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "Cancel order 456"}'
+  -d '{"message": "Cancel order 456", "customer_id": 1}'
 # order 456 was already shipped -> it can't be cancelled, the agent explains why
+```
+
+Start a new conversation by omitting `conversation_id`. Continue it by sending
+the ID returned by the first response:
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "I want to cancel my order", "customer_id": 1}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "The 123 one", "customer_id": 1, "conversation_id": "<id-from-the-first-response>"}'
 ```
 
 
 ## Versions
 
-- **V0 (current)** — single agent, three tools (`get_order`, `cancel_order`, `change_delivery_date`). See [versions/v0.md](versions/v0.md) for the full spec: goal, architecture, request flow, and current limitations.
-- **V1 → V9 (planned)** — see [versions/next.md](versions/next.md) for the full roadmap: conversational state, LangGraph, evals, RAG, multi-agent, distribution, production.
+- **V0 (done)** — single agent and three tools. See [versions/v0.md](versions/v0.md).
+- **V1 (current)** — conversation state, customer-scoped orders, and multi-step tool calling. See [versions/v1.md](versions/v1.md).
+- **V2 → V9 (planned)** — see [versions/next.md](versions/next.md) for the roadmap: LangGraph, evals, RAG, multi-agent, distribution, and production.

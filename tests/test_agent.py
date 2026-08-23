@@ -10,7 +10,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from app.agent import handle_message
+from app.agent import MAX_AGENT_ITERATIONS, conversations, handle_message
 from app.tools.orders import orders
 
 
@@ -28,6 +28,19 @@ def _tool_call_response(name: str, arguments: dict, call_id: str = "call_1"):
     # tool at once.
     message = SimpleNamespace(content=None, tool_calls=[tool_call])
     # agent.py only reads response.choices[0].message, so simulating that is enough.
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def _multiple_tool_calls_response(*calls):
+    """Build one model response containing several tool calls in the same round."""
+    tool_calls = [
+        SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+        )
+        for call_id, name, arguments in calls
+    ]
+    message = SimpleNamespace(content=None, tool_calls=tool_calls)
     return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
@@ -68,11 +81,12 @@ async def test_where_is_my_order_uses_get_order():
         _text_response("Tu pedido 123 está en preparación, llega el 18 de agosto."),
     )
 
-    await handle_message("¿Dónde está mi pedido 123?", client=client)
+    await handle_message("¿Dónde está mi pedido 123?", customer_id=1, client=client)
 
     assert _tool_result_sent_to_llm(client) == {
         "success": True,
         "id": 123,
+        "customer_id": 1,
         "status": "processing",
         "delivery_date": "2026-08-18",
     }
@@ -86,7 +100,7 @@ async def test_cancel_order_uses_cancel_order_and_mutates_state():
         _text_response("Listo, cancelé tu pedido 123."),
     )
 
-    await handle_message("Cancelame el pedido 123", client=client)
+    await handle_message("Cancelame el pedido 123", customer_id=1, client=client)
 
     assert _tool_result_sent_to_llm(client) == {
         "success": True,
@@ -105,7 +119,9 @@ async def test_change_delivery_date_uses_change_delivery_date_tool():
     )
 
     await handle_message(
-        "Quiero cambiar la entrega del pedido 123 al 21 de agosto de 2026", client=client
+        "Quiero cambiar la entrega del pedido 123 al 21 de agosto de 2026",
+        customer_id=1,
+        client=client,
     )
 
     assert _tool_result_sent_to_llm(client) == {
@@ -124,7 +140,7 @@ async def test_cancel_nonexistent_order_never_reports_success():
         _text_response("No encontré ningún pedido con ese número."),
     )
 
-    await handle_message("Cancelame el pedido 999", client=client)
+    await handle_message("Cancelame el pedido 999", customer_id=1, client=client)
 
     tool_result = _tool_result_sent_to_llm(client)
     assert tool_result["success"] is False
@@ -140,10 +156,104 @@ async def test_cancel_shipped_order_does_not_mutate_state():
         _text_response("No pude cancelar tu pedido 456 porque ya fue enviado."),
     )
 
-    await handle_message("Cancelame el pedido 456", client=client)
+    await handle_message("Cancelame el pedido 456", customer_id=1, client=client)
 
     tool_result = _tool_result_sent_to_llm(client)
     assert tool_result["success"] is False
     assert tool_result["error"] == "order_not_cancellable"
     # no matter what the final text says, a shipped order never actually gets cancelled
     assert orders[456]["status"] == "shipped"
+
+
+async def test_agent_can_chain_dependent_tool_calls():
+    """The second tool is selected only after the model sees the first result."""
+    client = _fake_client(
+        _tool_call_response("get_customer_orders", {}, call_id="list_orders"),
+        _tool_call_response("cancel_order", {"order_id": 123}, call_id="cancel_order"),
+        _text_response("Listo, cancelé tu pedido 123."),
+    )
+
+    response, conversation_id = await handle_message(
+        "Cancelá mi pedido en procesamiento",
+        customer_id=1,
+        client=client,
+    )
+
+    assert response == "Listo, cancelé tu pedido 123."
+    assert conversation_id in conversations
+    assert client.chat.completions.create.await_count == 3
+    assert orders[123]["status"] == "cancelled"
+
+
+async def test_agent_executes_multiple_tool_calls_from_one_model_response():
+    client = _fake_client(
+        _multiple_tool_calls_response(
+            ("get_123", "get_order", {"order_id": 123}),
+            ("get_456", "get_order", {"order_id": 456}),
+        ),
+        _text_response("El pedido 123 está en preparación y el 456 fue enviado."),
+    )
+
+    await handle_message("Compará mis pedidos 123 y 456", customer_id=1, client=client)
+
+    second_call_messages = client.chat.completions.create.await_args_list[1].kwargs["messages"]
+    tool_messages = [message for message in second_call_messages if message.get("role") == "tool"]
+    assert [message["tool_call_id"] for message in tool_messages] == ["get_123", "get_456"]
+    assert [json.loads(message["content"])["id"] for message in tool_messages] == [123, 456]
+
+
+async def test_conversation_history_is_reused_across_turns():
+    client = _fake_client(
+        _tool_call_response("get_customer_orders", {}),
+        _text_response("Tenés los pedidos 123 y 456. ¿Cuál querés cancelar?"),
+        _tool_call_response("cancel_order", {"order_id": 123}, call_id="call_2"),
+        _text_response("Listo, cancelé tu pedido 123."),
+    )
+
+    _, conversation_id = await handle_message(
+        "Quiero cancelar mi pedido",
+        customer_id=1,
+        client=client,
+    )
+    response, returned_id = await handle_message(
+        "El 123",
+        customer_id=1,
+        conversation_id=conversation_id,
+        client=client,
+    )
+
+    assert response == "Listo, cancelé tu pedido 123."
+    assert returned_id == conversation_id
+    fourth_call_messages = client.chat.completions.create.await_args_list[2].kwargs["messages"]
+    assert {"role": "user", "content": "Quiero cancelar mi pedido"} in fourth_call_messages
+    assert {"role": "user", "content": "El 123"} in fourth_call_messages
+
+
+async def test_customer_cannot_reuse_another_customers_conversation():
+    client = _fake_client(_text_response("Hola."))
+    _, conversation_id = await handle_message("Hola", customer_id=1, client=client)
+
+    try:
+        await handle_message(
+            "Continuemos",
+            customer_id=2,
+            conversation_id=conversation_id,
+            client=client,
+        )
+    except ValueError as exc:
+        assert str(exc) == "conversation_not_found"
+    else:
+        raise AssertionError("A customer must not access another customer's conversation")
+
+
+async def test_agent_stops_after_iteration_limit():
+    repeated_calls = [
+        _tool_call_response("get_customer_orders", {}, call_id=f"call_{index}")
+        for index in range(MAX_AGENT_ITERATIONS)
+    ]
+    client = _fake_client(*repeated_calls)
+
+    response, _ = await handle_message("Seguí buscando", customer_id=1, client=client)
+
+    assert "No pude completar" in response
+    assert client.chat.completions.create.await_count == MAX_AGENT_ITERATIONS
