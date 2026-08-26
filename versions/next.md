@@ -1,34 +1,16 @@
 
 ## Versions
 
-1. **V0 — Single agent + 3 tools (current). DONE**
+1. **V0 — Single agent + 3 tools. DONE**
    See [v0.md](v0.md) for the full spec. Focus: tool calling, structured outputs, and the separation between the LLM and business logic.
 
-2. **V1 — Real conversations (in progress)**
+2. **V1 — Real conversations. DONE**
    See [v1.md](v1.md) for the full spec. Adds a `get_customer_orders(customer_id)` tool, conversation state across turns, and generalizes the tool-calling loop to a bounded `while` so the agent can chain dependent tool calls within one turn.
 
-3. **V2 — LangGraph**
-   This is where LangGraph would actually come in.
-
-   Turn the flow into an explicit state machine:
-
-   ```text
-   START
-     ↓
-   understand_request
-     ↓
-   retrieve_information
-     ↓
-   decide_action
-     ↓
-   execute_tool
-     ↓
-   verify_result
-     ↓
-   END
-   ```
-
-   This is where you'll really understand what LangGraph is for.
+3. **V2 — Explicit workflows with LangGraph (in progress)**
+   See [v2.md](v2.md) for the full spec. Replaces the manual agent loop with
+   explicit state, nodes, conditional edges, result verification, and in-memory
+   graph checkpoints while preserving the V1 HTTP contract and business tools.
 
 4. **V3 — Simulator + evals**
    Before scaling up, make the agent measurable.
