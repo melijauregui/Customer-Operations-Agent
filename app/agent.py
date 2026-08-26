@@ -12,6 +12,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.config import OPENAI_MODEL, get_client
+from app.llm import SYSTEM_PROMPT, TOOLS, assistant_message_to_dict
 from app.models import (
     CancelOrderArgs,
     ChangeDeliveryDateArgs,
@@ -28,80 +29,6 @@ MAX_AGENT_ITERATIONS = 5
 # V1 keeps state in process memory. Each conversation is bound to one customer
 # so a conversation id cannot be reused to operate as another customer.
 conversations: dict[str, dict] = {}
-
-SYSTEM_PROMPT = (
-    "Sos un agente de atención al cliente de un e-commerce. Para consultar, "
-    "modificar o cancelar pedidos, usá siempre las tools disponibles; nunca inventes el "
-    "resultado de una acción ni afirmes que algo se hizo si no llamaste a la tool "
-    "correspondiente. Si una tool devuelve success=false, explicale el problema "
-    "al usuario sin decir que la acción tuvo éxito. El customer_id es contexto seguro "
-    "de la aplicación: nunca se lo pidas al usuario ni intentes elegirlo."
-)
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_order",
-            "description": "Get the status and delivery date of one of the current customer's orders.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "order_id": {"type": "integer", "description": "The order id."},
-                },
-                "required": ["order_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_customer_orders",
-            "description": "List all orders belonging to the current authenticated customer.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "cancel_order",
-            "description": "Cancel one of the current customer's orders, if it is cancellable.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "order_id": {"type": "integer", "description": "The order id."},
-                },
-                "required": ["order_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "change_delivery_date",
-            "description": "Change the delivery date of one of the current customer's orders.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "order_id": {"type": "integer", "description": "The order id."},
-                    "new_date": {
-                        "type": "string",
-                        "description": "New delivery date, in YYYY-MM-DD format.",
-                    },
-                },
-                "required": ["order_id", "new_date"],
-                "additionalProperties": False,
-            },
-        },
-    },
-]
 
 _ARG_MODELS = {
     "get_order": GetOrderArgs,
@@ -120,24 +47,6 @@ _TOOL_DISPATCH = {
         args.order_id, args.new_date.isoformat(), customer_id
     ),
 }
-
-
-def _assistant_message_to_dict(assistant_message) -> dict:
-    """Convert an SDK message into plain data suitable for API history and storage."""
-    message = {"role": "assistant", "content": assistant_message.content}
-    if assistant_message.tool_calls:
-        message["tool_calls"] = [
-            {
-                "id": tool_call.id,
-                "type": "function",
-                "function": {
-                    "name": tool_call.function.name,
-                    "arguments": tool_call.function.arguments,
-                },
-            }
-            for tool_call in assistant_message.tool_calls
-        ]
-    return message
 
 
 def _execute_tool_call(tool_call, customer_id: int) -> dict:
@@ -211,7 +120,7 @@ async def handle_message(
             tools=TOOLS,
         )
         assistant_message = response.choices[0].message
-        assistant_history_message = _assistant_message_to_dict(assistant_message)
+        assistant_history_message = assistant_message_to_dict(assistant_message)
         messages.append(assistant_history_message)
         history.append(assistant_history_message)
 

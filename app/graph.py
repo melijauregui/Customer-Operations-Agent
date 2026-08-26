@@ -5,7 +5,13 @@ manual loop until the graph nodes and routing are implemented and tested.
 """
 
 import operator
+import logging
 from typing import Annotated, TypedDict
+
+from app.config import OPENAI_MODEL
+from app.llm import SYSTEM_PROMPT, TOOLS, assistant_message_to_dict
+
+logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict):
@@ -29,3 +35,28 @@ class AgentState(TypedDict):
     customer_id: int
     tool_iterations: int
     verification_error: str | None
+
+
+async def call_model(state: AgentState, *, client) -> dict:
+    """Ask the LLM to either answer the user or request one or more tools.
+
+    The node receives the complete graph state but returns only its state
+    update. The messages reducer will append the returned assistant message to
+    the existing conversation history.
+
+    `client` is injected by the graph builder (and directly by unit tests), so
+    this node never creates a real OpenAI client or requires an API key itself.
+    """
+    response = await client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *state["messages"],
+        ],
+        tools=TOOLS,
+    )
+    assistant_message = response.choices[0].message
+    state_message = assistant_message_to_dict(assistant_message)
+
+    logger.info("graph_node=call_model tool_calls=%s", bool(assistant_message.tool_calls))
+    return {"messages": [state_message]}
