@@ -4,9 +4,9 @@ The *Args models validate/convert what the LLM sends as arguments for a tool cal
 before those values reach the business logic in app/tools/orders.py.
 
 Important: `customer_id` never appears in these *Args. It's session context (it
-comes from ChatRequest, not from what the LLM decides) and gets injected in
-agent.py — never a parameter the model fills in, so it can't "choose" to act as
-another customer.
+comes from ChatRequest, not from what the LLM decides) and gets injected by the
+tool executor — never a parameter the model fills in, so it can't "choose" to
+act as another customer.
 """
 
 from datetime import date

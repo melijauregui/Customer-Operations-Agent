@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock
 from langgraph.graph import END, START, StateGraph
 
 from app.config import OPENAI_MODEL
-from app.graph import AgentState, call_model
+from app.graph import AgentState, call_model, execute_tools, should_continue
 from app.llm import SYSTEM_PROMPT, TOOLS
+from app.tools.orders import orders
 
 
 def _fake_client(message):
@@ -121,3 +122,181 @@ async def test_call_model_preserves_structured_tool_calls():
             ],
         }
     ]
+
+
+def test_should_continue_routes_tool_calls_to_tool_execution():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {
+                        "name": "get_order",
+                        "arguments": '{"order_id": 123}',
+                    },
+                }
+            ],
+        }
+    )
+
+    assert should_continue(state) == "execute_tools"
+
+
+def test_should_continue_routes_final_text_to_end():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": "Order 123 is processing.",
+        }
+    )
+
+    assert should_continue(state) == END
+
+
+def test_should_continue_rejects_an_unexpected_last_message_role():
+    state = _initial_state()
+
+    try:
+        should_continue(state)
+    except ValueError as exc:
+        assert str(exc) == "should_continue requires an assistant message"
+    else:
+        raise AssertionError("Routing should fail when call_model did not produce the last message")
+
+
+def test_execute_tools_returns_the_real_tool_result_as_a_state_update():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {
+                        "name": "get_order",
+                        "arguments": '{"order_id": 123}',
+                    },
+                }
+            ],
+        }
+    )
+
+    update = execute_tools(state)
+
+    assert update["tool_iterations"] == 1
+    assert len(update["messages"]) == 1
+    assert update["messages"][0]["role"] == "tool"
+    assert update["messages"][0]["tool_call_id"] == "call_123"
+    assert json.loads(update["messages"][0]["content"]) == {
+        "success": True,
+        "id": 123,
+        "customer_id": 1,
+        "status": "processing",
+        "delivery_date": "2026-08-18",
+    }
+    # LangGraph applies this update later; the node does not append it itself.
+    assert len(state["messages"]) == 2
+    assert state["tool_iterations"] == 0
+
+
+def test_execute_tools_handles_several_calls_from_one_assistant_message():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "cancel_123",
+                    "type": "function",
+                    "function": {
+                        "name": "cancel_order",
+                        "arguments": '{"order_id": 123}',
+                    },
+                },
+                {
+                    "id": "get_456",
+                    "type": "function",
+                    "function": {
+                        "name": "get_order",
+                        "arguments": '{"order_id": 456}',
+                    },
+                },
+            ],
+        }
+    )
+
+    update = execute_tools(state)
+    results = [json.loads(message["content"]) for message in update["messages"]]
+
+    assert [message["tool_call_id"] for message in update["messages"]] == [
+        "cancel_123",
+        "get_456",
+    ]
+    assert results[0] == {"success": True, "order_id": 123, "status": "cancelled"}
+    assert results[1]["id"] == 456
+    assert orders[123]["status"] == "cancelled"
+    # One model response is one tool round, regardless of the number of calls.
+    assert update["tool_iterations"] == 1
+
+
+def test_execute_tools_injects_customer_id_from_graph_state():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "foreign_order",
+                    "type": "function",
+                    "function": {
+                        "name": "get_order",
+                        "arguments": '{"order_id": 789}',
+                    },
+                }
+            ],
+        }
+    )
+
+    update = execute_tools(state)
+    result = json.loads(update["messages"][0]["content"])
+
+    # Order 789 exists but belongs to customer 2. The state belongs to customer
+    # 1, so the business tool must behave exactly as if that order did not exist.
+    assert result["success"] is False
+    assert result["error"] == "order_not_found"
+
+
+def test_execute_tools_returns_invalid_arguments_as_a_structured_result():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "invalid_order_id",
+                    "type": "function",
+                    "function": {
+                        "name": "cancel_order",
+                        "arguments": '{"order_id": "not-an-integer"}',
+                    },
+                }
+            ],
+        }
+    )
+
+    update = execute_tools(state)
+    result = json.loads(update["messages"][0]["content"])
+
+    assert result["success"] is False
+    assert result["error"] == "invalid_arguments"
+    assert orders[123]["status"] == "processing"

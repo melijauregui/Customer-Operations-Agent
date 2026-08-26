@@ -9,17 +9,9 @@ import json
 import logging
 from uuid import uuid4
 
-from pydantic import ValidationError
-
 from app.config import OPENAI_MODEL, get_client
 from app.llm import SYSTEM_PROMPT, TOOLS, assistant_message_to_dict
-from app.models import (
-    CancelOrderArgs,
-    ChangeDeliveryDateArgs,
-    GetCustomerOrdersArgs,
-    GetOrderArgs,
-)
-from app.tools import orders as orders_tools
+from app.tool_executor import execute_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -29,54 +21,6 @@ MAX_AGENT_ITERATIONS = 5
 # V1 keeps state in process memory. Each conversation is bound to one customer
 # so a conversation id cannot be reused to operate as another customer.
 conversations: dict[str, dict] = {}
-
-_ARG_MODELS = {
-    "get_order": GetOrderArgs,
-    "get_customer_orders": GetCustomerOrdersArgs,
-    "cancel_order": CancelOrderArgs,
-    "change_delivery_date": ChangeDeliveryDateArgs,
-}
-
-# Every dispatch function receives customer_id from the trusted application
-# context. It is never read from model-generated tool arguments.
-_TOOL_DISPATCH = {
-    "get_order": lambda args, customer_id: orders_tools.get_order(args.order_id, customer_id),
-    "get_customer_orders": lambda args, customer_id: orders_tools.get_customer_orders(customer_id),
-    "cancel_order": lambda args, customer_id: orders_tools.cancel_order(args.order_id, customer_id),
-    "change_delivery_date": lambda args, customer_id: orders_tools.change_delivery_date(
-        args.order_id, args.new_date.isoformat(), customer_id
-    ),
-}
-
-
-def _execute_tool_call(tool_call, customer_id: int) -> dict:
-    """Validate one model request and execute the matching business function."""
-    name = tool_call.function.name
-    arg_model = _ARG_MODELS.get(name)
-    if arg_model is None:
-        return {"success": False, "error": "unknown_tool", "message": f"Tool '{name}' no existe."}
-
-    try:
-        raw_args = json.loads(tool_call.function.arguments)
-        args = arg_model(**raw_args)
-    except (json.JSONDecodeError, TypeError, ValidationError) as exc:
-        logger.warning(
-            "tool_arguments_invalid tool=%s raw_args=%s error=%s",
-            name,
-            tool_call.function.arguments,
-            exc,
-        )
-        return {
-            "success": False,
-            "error": "invalid_arguments",
-            "message": f"Argumentos inválidos para '{name}': {exc}",
-        }
-
-    logger.info("tool_selected=%s tool_arguments=%s", name, args.model_dump(mode="json"))
-    result = _TOOL_DISPATCH[name](args, customer_id)
-    logger.info("tool_result=%s", result)
-    return result
-
 
 def _load_conversation(conversation_id: str | None, customer_id: int) -> tuple[str, list]:
     """Create a conversation or return a copy of an existing customer's history."""
@@ -138,7 +82,11 @@ async def handle_message(
         # After executing all of them, the loop calls the model again so it can
         # either answer or request another tool based on these real results.
         for tool_call in assistant_message.tool_calls:
-            result = _execute_tool_call(tool_call, customer_id)
+            result = execute_tool_call(
+                name=tool_call.function.name,
+                arguments_json=tool_call.function.arguments,
+                customer_id=customer_id,
+            )
             tool_message = {
                 "role": "tool",
                 "tool_call_id": tool_call.id,
