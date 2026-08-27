@@ -9,6 +9,7 @@ import logging
 import operator
 from typing import Annotated, TypedDict
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.config import OPENAI_MODEL
@@ -230,13 +231,16 @@ def after_verification(state: AgentState) -> str:
     return "call_model"
 
 
-def build_graph(*, client):
-    """Build the first executable V2 graph without persistence.
+def build_graph(*, client, checkpointer=None):
+    """Build the V2 graph with an injectable in-memory checkpointer.
+    The checkpointer saves snapshots of AgentState, associated with a thread_id.
 
     The OpenAI client is captured by the model-node closure, keeping it out of
     checkpointable graph state and allowing tests to inject a deterministic
-    client double.
+    client double. A new `InMemorySaver` is created for each graph unless a
+    checkpointer is explicitly provided.
     """
+    checkpointer = checkpointer or InMemorySaver()
 
     async def model_node(state: AgentState) -> dict:
         return await call_model(state, client=client)
@@ -265,4 +269,54 @@ def build_graph(*, client):
         },
     )
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
+
+
+def conversation_config(conversation_id: str) -> dict:
+    """Map the API conversation id to LangGraph's checkpoint thread id."""
+    return {"configurable": {"thread_id": conversation_id}}
+
+
+async def run_conversation_turn(
+    graph,
+    *,
+    message: str,
+    customer_id: int,
+    conversation_id: str,
+    create_if_missing: bool = False,
+) -> AgentState:
+    """Run one user turn while preserving history and enforcing ownership.
+
+    Reusing a `conversation_id` loads its checkpointed messages. Before adding
+    new input, the application verifies that the stored state belongs to the
+    same customer. Unknown and foreign ids use the same error to avoid leaking
+    whether a conversation exists. `create_if_missing=True` is reserved for an
+    id the application has just generated for a new conversation.
+
+    Per-turn workflow fields are reset, while `messages` is appended by the
+    reducer to the history loaded from the checkpointer.
+    """
+    config = conversation_config(conversation_id)
+    snapshot = await graph.aget_state(config)
+
+    if not snapshot.values and not create_if_missing:
+        raise ValueError("conversation_not_found")
+
+    if snapshot.values and snapshot.values.get("customer_id") != customer_id:
+        raise ValueError("conversation_not_found")
+
+    result = await graph.ainvoke(
+        {
+            "messages": [{"role": "user", "content": message}],
+            "customer_id": customer_id,
+            "tool_iterations": 0,
+            "verification_error": None,
+        },
+        config=config,
+    )
+    logger.info(
+        "graph_turn_completed conversation_id=%s customer_id=%s",
+        conversation_id,
+        customer_id,
+    )
+    return result

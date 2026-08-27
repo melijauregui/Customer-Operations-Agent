@@ -13,7 +13,9 @@ from app.graph import (
     after_verification,
     build_graph,
     call_model,
+    conversation_config,
     execute_tools,
+    run_conversation_turn,
     should_continue,
     verify_results,
 )
@@ -454,7 +456,10 @@ async def test_compiled_graph_ends_when_model_returns_final_text():
     )
     graph = build_graph(client=client)
 
-    result = await graph.ainvoke(_initial_state())
+    result = await graph.ainvoke(
+        _initial_state(),
+        config=conversation_config("direct-response"),
+    )
 
     assert result["messages"] == [
         {"role": "user", "content": "Where is order 123?"},
@@ -478,7 +483,10 @@ async def test_compiled_graph_executes_a_tool_and_returns_to_the_model():
     )
     graph = build_graph(client=client)
 
-    result = await graph.ainvoke(_initial_state())
+    result = await graph.ainvoke(
+        _initial_state(),
+        config=conversation_config("one-tool-round"),
+    )
 
     assert [message["role"] for message in result["messages"]] == [
         "user",
@@ -513,7 +521,10 @@ async def test_compiled_graph_can_chain_dependent_tool_rounds():
     )
     graph = build_graph(client=client)
 
-    result = await graph.ainvoke(_initial_state())
+    result = await graph.ainvoke(
+        _initial_state(),
+        config=conversation_config("dependent-tool-rounds"),
+    )
 
     assert [message["role"] for message in result["messages"]] == [
         "user",
@@ -527,3 +538,122 @@ async def test_compiled_graph_can_chain_dependent_tool_rounds():
     assert orders[123]["status"] == "cancelled"
     assert result["messages"][-1]["content"] == "Order 123 was cancelled."
     assert client.chat.completions.create.await_count == 3
+
+
+async def test_same_conversation_id_restores_checkpointed_history():
+    client = _fake_client(
+        SimpleNamespace(content="Which order?", tool_calls=None),
+        SimpleNamespace(content="Order 123 is processing.", tool_calls=None),
+    )
+    graph = build_graph(client=client)
+
+    first_result = await run_conversation_turn(
+        graph,
+        message="Where is my order?",
+        customer_id=1,
+        conversation_id="conversation-a",
+        create_if_missing=True,
+    )
+    second_result = await run_conversation_turn(
+        graph,
+        message="The 123 one",
+        customer_id=1,
+        conversation_id="conversation-a",
+    )
+
+    assert first_result["messages"] == [
+        {"role": "user", "content": "Where is my order?"},
+        {"role": "assistant", "content": "Which order?"},
+    ]
+    assert second_result["messages"] == [
+        {"role": "user", "content": "Where is my order?"},
+        {"role": "assistant", "content": "Which order?"},
+        {"role": "user", "content": "The 123 one"},
+        {"role": "assistant", "content": "Order 123 is processing."},
+    ]
+
+    second_llm_messages = client.chat.completions.create.await_args_list[1].kwargs["messages"]
+    assert {"role": "user", "content": "Where is my order?"} in second_llm_messages
+    assert {"role": "assistant", "content": "Which order?"} in second_llm_messages
+    assert {"role": "user", "content": "The 123 one"} in second_llm_messages
+
+    snapshot = await graph.aget_state(conversation_config("conversation-a"))
+    assert snapshot.values["messages"] == second_result["messages"]
+    assert snapshot.values["customer_id"] == 1
+
+
+async def test_different_conversation_id_starts_with_empty_history():
+    client = _fake_client(
+        SimpleNamespace(content="First response", tool_calls=None),
+        SimpleNamespace(content="Second response", tool_calls=None),
+    )
+    graph = build_graph(client=client)
+
+    await run_conversation_turn(
+        graph,
+        message="Message for conversation A",
+        customer_id=1,
+        conversation_id="conversation-a",
+        create_if_missing=True,
+    )
+    result_b = await run_conversation_turn(
+        graph,
+        message="Message for conversation B",
+        customer_id=1,
+        conversation_id="conversation-b",
+        create_if_missing=True,
+    )
+
+    assert result_b["messages"] == [
+        {"role": "user", "content": "Message for conversation B"},
+        {"role": "assistant", "content": "Second response"},
+    ]
+
+
+async def test_customer_cannot_reuse_another_customers_checkpoint():
+    client = _fake_client(
+        SimpleNamespace(content="Customer one's response", tool_calls=None),
+    )
+    graph = build_graph(client=client)
+
+    await run_conversation_turn(
+        graph,
+        message="Customer one's message",
+        customer_id=1,
+        conversation_id="private-conversation",
+        create_if_missing=True,
+    )
+
+    try:
+        await run_conversation_turn(
+            graph,
+            message="Customer two trying to continue",
+            customer_id=2,
+            conversation_id="private-conversation",
+        )
+    except ValueError as exc:
+        assert str(exc) == "conversation_not_found"
+    else:
+        raise AssertionError("A customer must not access another customer's checkpoint")
+
+    # Ownership is rejected before another model call can spend tokens or act.
+    assert client.chat.completions.create.await_count == 1
+
+
+async def test_unknown_conversation_id_is_not_created_implicitly():
+    client = _fake_client()
+    graph = build_graph(client=client)
+
+    try:
+        await run_conversation_turn(
+            graph,
+            message="Continue an unknown conversation",
+            customer_id=1,
+            conversation_id="unknown-conversation",
+        )
+    except ValueError as exc:
+        assert str(exc) == "conversation_not_found"
+    else:
+        raise AssertionError("An unknown supplied conversation id must not create a thread")
+
+    assert client.chat.completions.create.await_count == 0
