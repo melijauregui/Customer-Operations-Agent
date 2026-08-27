@@ -7,17 +7,20 @@ from unittest.mock import AsyncMock
 from langgraph.graph import END, START, StateGraph
 
 from app.config import OPENAI_MODEL
-from app.graph import AgentState, call_model, execute_tools, should_continue
+from app.graph import AgentState, build_graph, call_model, execute_tools, should_continue
 from app.llm import SYSTEM_PROMPT, TOOLS
 from app.tools.orders import orders
 
 
-def _fake_client(message):
-    """Return an OpenAI client double that yields one predefined message."""
-    response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
+def _fake_client(*messages):
+    """Return an OpenAI client double that yields predefined messages in order."""
+    responses = [
+        SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        for message in messages
+    ]
     client = SimpleNamespace()
     client.chat = SimpleNamespace(
-        completions=SimpleNamespace(create=AsyncMock(return_value=response))
+        completions=SimpleNamespace(create=AsyncMock(side_effect=responses))
     )
     return client
 
@@ -300,3 +303,84 @@ def test_execute_tools_returns_invalid_arguments_as_a_structured_result():
     assert result["success"] is False
     assert result["error"] == "invalid_arguments"
     assert orders[123]["status"] == "processing"
+
+
+async def test_compiled_graph_ends_when_model_returns_final_text():
+    client = _fake_client(
+        SimpleNamespace(content="Hello!", tool_calls=None),
+    )
+    graph = build_graph(client=client)
+
+    result = await graph.ainvoke(_initial_state())
+
+    assert result["messages"] == [
+        {"role": "user", "content": "Where is order 123?"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+    assert result["tool_iterations"] == 0
+    assert client.chat.completions.create.await_count == 1
+
+
+async def test_compiled_graph_executes_a_tool_and_returns_to_the_model():
+    get_order_call = SimpleNamespace(
+        id="get_123",
+        function=SimpleNamespace(
+            name="get_order",
+            arguments='{"order_id": 123}',
+        ),
+    )
+    client = _fake_client(
+        SimpleNamespace(content=None, tool_calls=[get_order_call]),
+        SimpleNamespace(content="Order 123 is processing.", tool_calls=None),
+    )
+    graph = build_graph(client=client)
+
+    result = await graph.ainvoke(_initial_state())
+
+    assert [message["role"] for message in result["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    tool_result = json.loads(result["messages"][2]["content"])
+    assert tool_result["success"] is True
+    assert tool_result["id"] == 123
+    assert result["messages"][-1]["content"] == "Order 123 is processing."
+    assert result["tool_iterations"] == 1
+    assert client.chat.completions.create.await_count == 2
+
+
+async def test_compiled_graph_can_chain_dependent_tool_rounds():
+    list_orders_call = SimpleNamespace(
+        id="list_orders",
+        function=SimpleNamespace(name="get_customer_orders", arguments="{}"),
+    )
+    cancel_order_call = SimpleNamespace(
+        id="cancel_123",
+        function=SimpleNamespace(
+            name="cancel_order",
+            arguments='{"order_id": 123}',
+        ),
+    )
+    client = _fake_client(
+        SimpleNamespace(content=None, tool_calls=[list_orders_call]),
+        SimpleNamespace(content=None, tool_calls=[cancel_order_call]),
+        SimpleNamespace(content="Order 123 was cancelled.", tool_calls=None),
+    )
+    graph = build_graph(client=client)
+
+    result = await graph.ainvoke(_initial_state())
+
+    assert [message["role"] for message in result["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert result["tool_iterations"] == 2
+    assert orders[123]["status"] == "cancelled"
+    assert result["messages"][-1]["content"] == "Order 123 was cancelled."
+    assert client.chat.completions.create.await_count == 3

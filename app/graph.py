@@ -9,7 +9,7 @@ import logging
 import operator
 from typing import Annotated, TypedDict
 
-from langgraph.graph import END
+from langgraph.graph import END, START, StateGraph
 
 from app.config import OPENAI_MODEL
 from app.llm import SYSTEM_PROMPT, TOOLS, assistant_message_to_dict
@@ -121,3 +121,32 @@ def execute_tools(state: AgentState) -> dict:
         "messages": tool_messages,
         "tool_iterations": state["tool_iterations"] + 1,
     }
+
+
+def build_graph(*, client):
+    """Build the first executable V2 graph without persistence.
+
+    The OpenAI client is captured by the model-node closure, keeping it out of
+    checkpointable graph state and allowing tests to inject a deterministic
+    client double.
+    """
+
+    async def model_node(state: AgentState) -> dict:
+        return await call_model(state, client=client)
+
+    builder = StateGraph(AgentState)
+    builder.add_node("call_model", model_node)
+    builder.add_node("execute_tools", execute_tools)
+
+    builder.add_edge(START, "call_model")
+    builder.add_conditional_edges(
+        "call_model",
+        should_continue,
+        {
+            "execute_tools": "execute_tools",
+            END: END,
+        },
+    )
+    builder.add_edge("execute_tools", "call_model")
+
+    return builder.compile()
