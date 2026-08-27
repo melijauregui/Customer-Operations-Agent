@@ -1,7 +1,7 @@
-"""LangGraph state and workflow construction for V2.
+"""LangGraph state, nodes, routing, and workflow construction for V2.
 
-Step 1 defines only the shared state. The production agent still uses the V1
-manual loop until the graph nodes and routing are implemented and tested.
+The production agent still uses the V1 manual loop until the graph has result
+verification, conversation checkpoints, and behavioral parity.
 """
 
 import json
@@ -16,6 +16,11 @@ from app.llm import SYSTEM_PROMPT, TOOLS, assistant_message_to_dict
 from app.tool_executor import execute_tool_call
 
 logger = logging.getLogger(__name__)
+
+SAFE_VERIFICATION_FAILURE = (
+    "No pude verificar de forma segura el resultado de la operación. "
+    "Por favor, intentá nuevamente."
+)
 
 
 class AgentState(TypedDict):
@@ -123,6 +128,108 @@ def execute_tools(state: AgentState) -> dict:
     }
 
 
+def _verification_failure(error: str) -> dict:
+    """Build a safe terminal update without exposing internal details."""
+    logger.error("graph_node=verify_results verification_error=%s", error)
+    return {
+        "verification_error": error,
+        "messages": [
+            {
+                "role": "assistant",
+                "content": SAFE_VERIFICATION_FAILURE,
+            }
+        ],
+    }
+
+
+def verify_results(state: AgentState) -> dict:
+    """Verify the structural contract between requested tools and their results.
+
+    `success=False` is a valid business result and must go back to the model.
+    Verification fails only when the workflow itself cannot prove which result
+    belongs to which tool call or cannot parse the expected result envelope.
+
+    Example of a valid state received after `execute_tools`:
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Cancel order 123",
+                },
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "cancel_order",
+                                "arguments": '{"order_id": 123}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": '{"success": true, "order_id": 123, "status": "cancelled"}',
+                },
+            ],
+            "customer_id": 1,
+            "tool_iterations": 1,
+            "verification_error": None,
+        }
+    """
+    assistant_index = None
+    for index in range(len(state["messages"]) - 1, -1, -1):
+        message = state["messages"][index]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            assistant_index = index
+            break
+
+    if assistant_index is None:
+        return _verification_failure("missing assistant tool-call message")
+
+    assistant_message = state["messages"][assistant_index]
+    try:
+        expected_ids = [tool_call["id"] for tool_call in assistant_message["tool_calls"]]
+    except (KeyError, TypeError):
+        return _verification_failure("malformed assistant tool-call message")
+
+    messages_after_call = state["messages"][assistant_index + 1 :]
+    tool_messages = [message for message in messages_after_call if message.get("role") == "tool"]
+    actual_ids = [message.get("tool_call_id") for message in tool_messages]
+
+    if actual_ids != expected_ids:
+        return _verification_failure(
+            f"tool result ids do not match: expected={expected_ids} actual={actual_ids}"
+        )
+
+    for tool_message in tool_messages:
+        try:
+            result = json.loads(tool_message["content"])
+        except (KeyError, TypeError, json.JSONDecodeError):
+            return _verification_failure(
+                f"invalid JSON result for tool_call_id={tool_message.get('tool_call_id')}"
+            )
+
+        if not isinstance(result, dict) or type(result.get("success")) is not bool:
+            return _verification_failure(
+                f"invalid result contract for tool_call_id={tool_message.get('tool_call_id')}"
+            )
+
+    logger.info("graph_node=verify_results verified_count=%s", len(tool_messages))
+    return {"verification_error": None}
+
+
+def after_verification(state: AgentState) -> str:
+    """Continue model reasoning only when tool results passed verification."""
+    if state["verification_error"]:
+        return END
+    return "call_model"
+
+
 def build_graph(*, client):
     """Build the first executable V2 graph without persistence.
 
@@ -137,6 +244,7 @@ def build_graph(*, client):
     builder = StateGraph(AgentState)
     builder.add_node("call_model", model_node)
     builder.add_node("execute_tools", execute_tools)
+    builder.add_node("verify_results", verify_results)
 
     builder.add_edge(START, "call_model")
     builder.add_conditional_edges(
@@ -147,6 +255,14 @@ def build_graph(*, client):
             END: END,
         },
     )
-    builder.add_edge("execute_tools", "call_model")
+    builder.add_edge("execute_tools", "verify_results")
+    builder.add_conditional_edges(
+        "verify_results",
+        after_verification,
+        {
+            "call_model": "call_model",
+            END: END,
+        },
+    )
 
     return builder.compile()

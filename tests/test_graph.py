@@ -7,7 +7,16 @@ from unittest.mock import AsyncMock
 from langgraph.graph import END, START, StateGraph
 
 from app.config import OPENAI_MODEL
-from app.graph import AgentState, build_graph, call_model, execute_tools, should_continue
+from app.graph import (
+    SAFE_VERIFICATION_FAILURE,
+    AgentState,
+    after_verification,
+    build_graph,
+    call_model,
+    execute_tools,
+    should_continue,
+    verify_results,
+)
 from app.llm import SYSTEM_PROMPT, TOOLS
 from app.tools.orders import orders
 
@@ -303,6 +312,140 @@ def test_execute_tools_returns_invalid_arguments_as_a_structured_result():
     assert result["success"] is False
     assert result["error"] == "invalid_arguments"
     assert orders[123]["status"] == "processing"
+
+
+def test_verify_results_accepts_a_structured_business_failure():
+    state = _initial_state()
+    state["messages"].extend(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "cancel_456",
+                        "type": "function",
+                        "function": {
+                            "name": "cancel_order",
+                            "arguments": '{"order_id": 456}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "cancel_456",
+                "content": json.dumps(
+                    {
+                        "success": False,
+                        "error": "order_not_cancellable",
+                    }
+                ),
+            },
+        ]
+    )
+
+    update = verify_results(state)
+
+    assert update == {"verification_error": None}
+    state.update(update)
+    assert after_verification(state) == "call_model"
+
+
+def test_verify_results_stops_when_a_tool_result_is_missing():
+    state = _initial_state()
+    state["messages"].append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "get_123",
+                    "type": "function",
+                    "function": {
+                        "name": "get_order",
+                        "arguments": '{"order_id": 123}',
+                    },
+                }
+            ],
+        }
+    )
+
+    update = verify_results(state)
+
+    assert "tool result ids do not match" in update["verification_error"]
+    assert update["messages"] == [
+        {
+            "role": "assistant",
+            "content": SAFE_VERIFICATION_FAILURE,
+        }
+    ]
+    state["verification_error"] = update["verification_error"]
+    assert after_verification(state) == END
+
+
+def test_verify_results_stops_when_tool_result_json_is_invalid():
+    state = _initial_state()
+    state["messages"].extend(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "get_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "arguments": '{"order_id": 123}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "get_123",
+                "content": "not-json",
+            },
+        ]
+    )
+
+    update = verify_results(state)
+
+    assert "invalid JSON result" in update["verification_error"]
+    assert update["messages"][0]["content"] == SAFE_VERIFICATION_FAILURE
+
+
+def test_verify_results_stops_when_success_is_not_boolean():
+    state = _initial_state()
+    state["messages"].extend(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "get_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "arguments": '{"order_id": 123}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "get_123",
+                "content": json.dumps({"success": "yes", "id": 123}),
+            },
+        ]
+    )
+
+    update = verify_results(state)
+
+    assert "invalid result contract" in update["verification_error"]
+    assert update["messages"][0]["content"] == SAFE_VERIFICATION_FAILURE
 
 
 async def test_compiled_graph_ends_when_model_returns_final_text():
