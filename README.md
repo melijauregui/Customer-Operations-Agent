@@ -1,6 +1,6 @@
 # Customer Operations Agent
 
-AI agent platform for Customer Operations, built progressively across versions. This is **V1**: one conversational agent, four order tools, in-memory conversation state, and a bounded multi-step tool-calling loop.
+AI agent platform for Customer Operations, built progressively across versions. **V2 is in progress**: the V1 agent loop is being migrated to a direct LangGraph workflow with explicit nodes, routing, result verification, and checkpointed conversation state.
 
 
 ## Installation
@@ -29,17 +29,27 @@ Server at `http://127.0.0.1:8000`. Interactive docs (Swagger) at `http://127.0.0
 
 ## Running the tests
 
-The unit tests (`test_tools.py` + `test_agent.py`) don't spend tokens or depend on OpenAI — the LLM is mocked in `test_agent.py`. These are the ones that run by default:
+The unit tests don't spend tokens or depend on OpenAI. The LLM is mocked where needed, including the V2 graph tests. These are the tests that run by default:
 
 ```bash
 pytest
 ```
 
-The integration test (`test_integration.py`) calls the real OpenAI API and is excluded from the normal run (see `pytest.ini`). Run it on purpose, and it requires a real `OPENAI_API_KEY`:
+The V2 integration tests in `test_integration.py` call the real OpenAI API and are excluded from the normal run (see `pytest.ini`). They exercise real tool selection, dependent multi-tool execution, LangGraph checkpoints, and customer isolation. Run them deliberately with a real `OPENAI_API_KEY`:
 
 ```bash
 pytest -m integration
 ```
+
+Run one integration test while iterating:
+
+```bash
+pytest -m integration tests/test_integration.py::test_v2_real_model_can_chain_dependent_tools -v
+```
+
+Because these tests depend on a remote probabilistic model, they are slower,
+cost tokens, and may occasionally need a retry even though their assertions
+focus on structured tool calls rather than exact response wording.
 
 ## Example requests
 
@@ -94,5 +104,6 @@ curl -X POST http://127.0.0.1:8000/chat \
 ## Versions
 
 - **V0 (done)** — single agent and three tools. See [versions/v0.md](versions/v0.md).
-- **V1 (current)** — conversation state, customer-scoped orders, and multi-step tool calling. See [versions/v1.md](versions/v1.md).
-- **V2 → V9 (planned)** — see [versions/next.md](versions/next.md) for the roadmap: LangGraph, evals, RAG, multi-agent, distribution, and production.
+- **V1 (done)** — conversation state, customer-scoped orders, and multi-step tool calling. See [versions/v1.md](versions/v1.md).
+- **V2 (in progress)** — direct LangGraph workflow, explicit verification, and checkpointed state. See [versions/v2.md](versions/v2.md).
+- **V3 → V9 (planned)** — see [versions/next.md](versions/next.md) for the roadmap: evals, RAG, multi-agent, distribution, and production.
